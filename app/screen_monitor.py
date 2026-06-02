@@ -101,6 +101,15 @@ INTERVAL      = 0.1
 HISTORY_SIZE  = 20   # fenêtre de vote (nombre de frames)
 VOTE_THRESHOLD = 4   # votes minimum pour confirmer une signature
 
+# Fork Launcher : via Circus OCR, l'OCR tourne plus lentement (appel HTTP) et
+# rate parfois une frame. On garde la valeur confirmee affichee tant qu'elle a
+# ete revue il y a moins de CLEAR_TIMEOUT_S secondes (au lieu d'effacer des 3
+# ratés consécutifs). La valeur ne disparait donc que si la signature radar a
+# vraiment disparu de l'ecran un certain temps.
+CLEAR_TIMEOUT_S = 5.0
+# Periode de heartbeat de la subscription Circus OCR (garde le service vivant).
+OCR_HEARTBEAT_S = 10.0
+
 BG         = "#0a0a0f"
 BG_ROW     = "#12121a"
 BG_ROW_ALT = "#0e0e18"
@@ -1386,10 +1395,18 @@ class App:
 
     def _quit(self):
         self.running = False
+        try:
+            _ocr.unsubscribe()
+        except Exception:
+            pass
         self.root.destroy()
 
     def _retour_menu(self):
         self.running = False
+        try:
+            _ocr.unsubscribe()
+        except Exception:
+            pass
         self.root.destroy()
         Menu()
 
@@ -1507,9 +1524,19 @@ class App:
                                  font=("Courier", self.font_size - 1, "bold"), anchor="w").pack(side="left")
 
     def _monitor_loop(self):
-        none_streak = 0
+        # Fork Launcher : subscription passive pour garder Circus OCR vivant.
+        _ocr.subscribe()
+        last_hb = time.monotonic()
+        # Horodatage de la derniere fois ou la valeur confirmee a ete revue.
+        last_confirmed_seen = time.monotonic()
         while self.running:
             try:
+                # Heartbeat periodique de la subscription.
+                now = time.monotonic()
+                if now - last_hb >= OCR_HEARTBEAT_S:
+                    _ocr.heartbeat()
+                    last_hb = now
+
                 # Fork Launcher : capture + OCR chiffres delegues a Circus OCR.
                 raw = read_signature_via_circus_ocr(_ocr, self.lookup)
                 if DEBUG_OCR and raw:
@@ -1518,30 +1545,26 @@ class App:
                 if len(self.history) > HISTORY_SIZE:
                     self.history.pop(0)
 
-                if raw is None:
-                    none_streak += 1
-                else:
-                    none_streak = 0
+                if raw is not None:
                     if self.confirmed_value is not None and not self._loading_active:
                         confirmed_variants = _get_variantes(self.confirmed_value, self.mapping, self.lookup)
                         confirmed_variants.add(self.confirmed_value)
-                        if raw not in confirmed_variants:
+                        if raw in confirmed_variants:
+                            # On revoit la valeur confirmee : on repousse le timeout.
+                            last_confirmed_seen = now
+                        else:
                             self.root.after(0, self._start_loading)
-                    elif self.confirmed_value is None and raw is not None and not self._loading_active:
+                    elif self.confirmed_value is None and not self._loading_active:
                         self.root.after(0, self._start_loading)
 
-                if self.confirmed_value is not None and len(self.history) >= 3:
-                    recent = self.history[-3:]
-                    confirmed_variants = _get_variantes(self.confirmed_value, self.mapping, self.lookup)
-                    confirmed_variants.add(self.confirmed_value)
-                    seen_confirmed = any(v in confirmed_variants for v in recent if v is not None)
-                    if not seen_confirmed:
-                        none_streak = 3
-
-                if none_streak >= 3 and self.confirmed_value is not None:
+                # Effacement base sur le temps : on ne vide la valeur confirmee
+                # que si elle n'a pas ete revue depuis CLEAR_TIMEOUT_S (la
+                # signature a vraiment disparu), au lieu d'effacer des 3 ratés.
+                if (self.confirmed_value is not None
+                        and (now - last_confirmed_seen) > CLEAR_TIMEOUT_S):
                     self.confirmed_value = None
                     self.history = []
-                    none_streak = 0
+                    last_confirmed_seen = now
                     self.root.after(0, self._show_placeholder)
 
                 valid = [v for v in self.history if v is not None]
@@ -1629,6 +1652,7 @@ class App:
                 if candidate != self.confirmed_value:
                     self.confirmed_value = candidate
                     self.history = []
+                    last_confirmed_seen = now  # nouvelle valeur : timeout reparti
                     c = candidate
                     self._t_detection = time.time()
                     self.root.after(0, self._start_loading)
@@ -1640,6 +1664,8 @@ class App:
                 time.sleep(INTERVAL)
             except Exception:
                 time.sleep(INTERVAL)
+        # Fin de surveillance : on libere la subscription Circus OCR.
+        _ocr.unsubscribe()
 
 
 # ─────────────────────────────────────────────

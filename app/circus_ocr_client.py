@@ -157,6 +157,28 @@ class CircusOcrClient:
             return None
         return data
 
+    # --- subscription (garde le service vivant) --------------------------
+    #
+    # Comme Circus VOIP / Racing : StarDetection enregistre une subscription
+    # passive (lineIds vide) pour empecher le watchdog idle de couper le
+    # service apres 60s. On heartbeat regulierement tant que la surveillance
+    # tourne, puis on se desabonne a l'arret.
+
+    def subscribe(self, client_id: str = "stardetection") -> bool:
+        body = {"clientId": client_id, "lineIds": []}
+        data = self._http_json("POST", "/subscriptions", body, timeout=5.0, quiet=True)
+        return bool(data and not data.get("error"))
+
+    def heartbeat(self, client_id: str = "stardetection") -> bool:
+        data = self._http_json("POST", f"/subscriptions/{client_id}/heartbeat",
+                               timeout=3.0, quiet=True)
+        return bool(data and not data.get("error"))
+
+    def unsubscribe(self, client_id: str = "stardetection") -> bool:
+        data = self._http_json("DELETE", f"/subscriptions/{client_id}",
+                               timeout=3.0, quiet=True)
+        return bool(data and not data.get("error"))
+
     # --- auto-demarrage du service ---------------------------------------
 
     def ensure_service(self, wait_s: float = 12.0) -> bool:
