@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Donnees utilisateur locales (jamais versionnees)
+app/config.json
+app/preferences.json
+debug_ocr/
+debug.log
+
+# Build / packaging
+build/
+dist/
+*.spec
+*.exe
+
+# Divers
+.DS_Store
+Thumbs.db
+README_UPSTREAM.md
