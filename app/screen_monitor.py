@@ -1255,9 +1255,10 @@ class Menu:
         except FileNotFoundError:
             self.status_label.config(text=T("status_no_csv"), fg=RED)
             return
-        # Fork Launcher : on s'assure que Circus OCR tourne (auto-demarrage)
-        # avant de lancer la surveillance, qui lira la signature via le service.
-        _ocr.ensure_service()
+        # Fork Launcher : on s'assure que Circus OCR tourne et on demarre le
+        # keepalive (subscription + heartbeat dans un thread dedie) pour que le
+        # service ne se coupe pas pendant la surveillance.
+        _ocr.start_keepalive()
         region = _ocr.get_region()
         self.root.destroy()
         App(region, mapping)
@@ -1396,7 +1397,7 @@ class App:
     def _quit(self):
         self.running = False
         try:
-            _ocr.unsubscribe()
+            _ocr.stop_keepalive()
         except Exception:
             pass
         self.root.destroy()
@@ -1404,7 +1405,7 @@ class App:
     def _retour_menu(self):
         self.running = False
         try:
-            _ocr.unsubscribe()
+            _ocr.stop_keepalive()
         except Exception:
             pass
         self.root.destroy()
@@ -1524,19 +1525,14 @@ class App:
                                  font=("Courier", self.font_size - 1, "bold"), anchor="w").pack(side="left")
 
     def _monitor_loop(self):
-        # Fork Launcher : subscription passive pour garder Circus OCR vivant.
-        _ocr.subscribe()
-        last_hb = time.monotonic()
+        # Le keepalive (subscription + heartbeat) tourne dans son propre thread
+        # (demarre dans Menu._lancer), decouple de l'OCR : meme si une lecture
+        # bloque (warmup EasyOCR), la subscription reste vivante.
         # Horodatage de la derniere fois ou la valeur confirmee a ete revue.
         last_confirmed_seen = time.monotonic()
         while self.running:
             try:
-                # Heartbeat periodique de la subscription.
                 now = time.monotonic()
-                if now - last_hb >= OCR_HEARTBEAT_S:
-                    _ocr.heartbeat()
-                    last_hb = now
-
                 # Fork Launcher : capture + OCR chiffres delegues a Circus OCR.
                 raw = read_signature_via_circus_ocr(_ocr, self.lookup)
                 if DEBUG_OCR and raw:
@@ -1664,8 +1660,6 @@ class App:
                 time.sleep(INTERVAL)
             except Exception:
                 time.sleep(INTERVAL)
-        # Fin de surveillance : on libere la subscription Circus OCR.
-        _ocr.unsubscribe()
 
 
 # ─────────────────────────────────────────────

@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -38,6 +39,8 @@ class CircusOcrClient:
     def __init__(self, base_url: str = OCR_BASE_URL, logger=None) -> None:
         self.base_url = base_url.rstrip("/")
         self._log = logger or (lambda msg: None)
+        self._keepalive_thread: Optional[threading.Thread] = None
+        self._keepalive_stop = threading.Event()
 
     # --- HTTP bas niveau --------------------------------------------------
 
@@ -178,6 +181,42 @@ class CircusOcrClient:
         data = self._http_json("DELETE", f"/subscriptions/{client_id}",
                                timeout=3.0, quiet=True)
         return bool(data and not data.get("error"))
+
+    def start_keepalive(self, client_id: str = "stardetection",
+                        period_s: float = 8.0) -> None:
+        """Demarre un thread dedie qui maintient la subscription active.
+
+        Decouple du thread OCR : meme si une lecture bloque (warmup EasyOCR au
+        1er appel, ~15-20s), le heartbeat continue de partir et le service ne
+        se coupe pas. S'assure d'abord que le service tourne.
+        """
+        if self._keepalive_thread and self._keepalive_thread.is_alive():
+            return
+        self._keepalive_stop.clear()
+
+        def _loop():
+            self.ensure_service()
+            if not self.subscribe(client_id):
+                self._log("[Circus OCR] subscribe initiale KO (retry dans la boucle)")
+            # Heartbeat regulier tant qu'on n'a pas demande l'arret.
+            while not self._keepalive_stop.wait(period_s):
+                if not self.heartbeat(client_id):
+                    # Service peut-etre redemarre : on re-subscribe.
+                    self.subscribe(client_id)
+            self.unsubscribe(client_id)
+
+        self._keepalive_thread = threading.Thread(
+            target=_loop, name="circus-ocr-keepalive", daemon=True
+        )
+        self._keepalive_thread.start()
+
+    def stop_keepalive(self) -> None:
+        """Arrete le thread de keepalive et libere la subscription."""
+        self._keepalive_stop.set()
+        t = self._keepalive_thread
+        if t and t.is_alive():
+            t.join(timeout=3.0)
+        self._keepalive_thread = None
 
     # --- auto-demarrage du service ---------------------------------------
 
