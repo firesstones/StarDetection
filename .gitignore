@@ -19,3 +19,7 @@ dist/
 .DS_Store
 Thumbs.db
 README_UPSTREAM.md
+
+# Build PyInstaller + installeur (uploades en release, pas versionnes)
+build-pyinstaller/
+dist-release/
