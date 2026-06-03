@@ -169,6 +169,9 @@ TRANSLATIONS = {
     "btn_menu":         {"FR": "← Menu",                         "EN": "← Menu"},
     "waiting":          {"FR": "En attente de détection...",     "EN": "Waiting for detection..."},
     "no_match":         {"FR": "Aucune correspondance",          "EN": "No match found"},
+    "multi_sig":        {"FR": "Multi-signature radar",          "EN": "Multi-signature radar"},
+    "multi_sig_hint":   {"FR": "Combinaison de plusieurs signatures : identification impossible.",
+                         "EN": "Combination of several signatures: cannot identify."},
     # Fenêtre préférences
     "prefs_title":      {"FR": "Préférences",                    "EN": "Preferences"},
     "prefs_heading":    {"FR": "Préférences des minerais",       "EN": "Mineral preferences"},
@@ -421,10 +424,14 @@ def _crop_to_number(img):
         pass
     return img
 
-def _correct_ocr_text(text, lookup=None):
+def _correct_ocr_text(text, lookup=None, allow_two_step=False):
     """Applique la correction OCR (matrice de confusion, hamming, variantes,
     validation CSV) sur une chaine OCR brute. Retourne la valeur corrigee
     valide, ou None.
+
+    `allow_two_step` : autorise la correction a 2 chiffres modifies. Desactive
+    par defaut (EasyOCR est fiable) car trop agressif -> faux positifs sur les
+    multi-signatures.
 
     Fork Launcher : c'est exactement la logique de correction historique de
     `read_number._extract`, mais extraite pour operer sur le texte renvoye par
@@ -481,15 +488,21 @@ def _correct_ocr_text(text, lookup=None):
                 candidates.append((0, _hamming(val, r), pos_pen, r))
             if r := _try("1" + corrected):
                 candidates.append((1, _hamming(val, r), 0, r))
-    for c1, _ in corrected_l1:
-        for i, c in enumerate(c1):
-            for replacement in CONFUSIONS_OCR.get(c, []):
-                c2 = c1[:i] + replacement + c1[i+1:]
-                if c2 != val:
-                    if r := _try(c2):
-                        candidates.append((0, _hamming(val, r) + 10, 0, r))
-                    if r := _try("1" + c2):
-                        candidates.append((1, _hamming(val, r) + 10, 0, r))
+    # Correction niveau 2 (deux chiffres modifies) : desactivee par defaut.
+    # Avec EasyOCR (lecture fiable) elle est trop agressive et peut transformer
+    # une vraie multi-signature (ex. 24400) en fausse valeur CSV (24400 -> 74400
+    # -> 14400). On la garde optionnelle pour compat, mais le fork ne l'utilise
+    # plus : une lecture confiante hors CSV doit rester une multi-signature.
+    if allow_two_step:
+        for c1, _ in corrected_l1:
+            for i, c in enumerate(c1):
+                for replacement in CONFUSIONS_OCR.get(c, []):
+                    c2 = c1[:i] + replacement + c1[i+1:]
+                    if c2 != val:
+                        if r := _try(c2):
+                            candidates.append((0, _hamming(val, r) + 10, 0, r))
+                        if r := _try("1" + c2):
+                            candidates.append((1, _hamming(val, r) + 10, 0, r))
     if candidates:
         best = min(candidates, key=lambda x: (x[0], x[1], x[2], int(x[3])))
         if DEBUG_OCR:
@@ -498,18 +511,34 @@ def _correct_ocr_text(text, lookup=None):
     return None
 
 
-def read_signature_via_circus_ocr(client, lookup=None):
-    """Lit la signature radar via le service Circus OCR (region radar-signature)
-    puis applique la correction OCR + validation CSV. Retourne la valeur ou None.
+def _value_known(value, mapping, lookup):
+    """True si `value` correspond a une signature connue du CSV (directe ou
+    via multiplicateur). Sert a distinguer une vraie multi-signature (nombre
+    confiant mais inconnu) d'une simple erreur OCR."""
+    try:
+        return bool(find_matches(int(value), mapping, lookup))
+    except (ValueError, TypeError):
+        return False
 
-    Remplace l'ancien `capture_region()` + `read_number()` local : la capture et
-    l'OCR chiffres sont faits par Circus OCR (EasyOCR, allowlist chiffres) ; seule
-    la correction metier reste ici.
+
+def read_signature_via_circus_ocr(client, lookup=None):
+    """Lit la signature radar via le service Circus OCR (region radar-signature).
+
+    Retourne un tuple (csv_value, raw_value) :
+      - csv_value : lecture corrigee ET validee contre le CSV (str) ou None.
+        Pilote le vote / l'identification du minerai (cas single-signature).
+      - raw_value : meilleure lecture brute plausible (3-6 chiffres dans la
+        plage MIN..MAX) meme si absente du CSV (str) ou None. Sert a detecter
+        les MULTI-SIGNATURES : quand plusieurs rochers se combinent, la
+        signature globale (ex. 24400) est un nombre reel mais absent du CSV.
+        Plutot que de forcer une valeur CSV proche (fausse info), on l'expose.
+
+    La capture et l'OCR chiffres sont faits par Circus OCR (EasyOCR, allowlist
+    chiffres) ; seule la correction metier reste ici.
     """
     data = client.read_digits()
     if not data:
-        return None
-    # On essaie d'abord la lecture combinee, puis chaque candidat brut.
+        return (None, None)
     texts = []
     combined = data.get("text")
     if combined:
@@ -519,11 +548,28 @@ def read_signature_via_circus_ocr(client, lookup=None):
             texts.append(cand)
     if DEBUG_OCR and texts:
         _debug_log(f"[CIRCUS-OCR] texts={texts}")
+
+    # csv_value : 1er texte qui se corrige en valeur CSV valide.
+    csv_value = None
     for t in texts:
         r = _correct_ocr_text(t, lookup)
         if r:
-            return r
-    return None
+            csv_value = r
+            break
+
+    # raw_value : 1ere lecture brute plausible (3-6 chiffres dans la plage),
+    # priorite a la lecture combinee.
+    raw_value = None
+    for t in texts:
+        mt = re.search(r"\d{3,6}", t or "")
+        if not mt:
+            continue
+        v = mt.group()
+        if MIN_VALUE <= int(v) <= MAX_VALUE:
+            raw_value = v
+            break
+
+    return (csv_value, raw_value)
 
 
 def read_number(img, lookup=None):
@@ -1275,6 +1321,8 @@ class App:
         self.lookup    = build_lookup(mapping)
         update_value_range(mapping)
         self.history   = []
+        self.raw_history = []          # lectures brutes (pour multi-signature)
+        self._multi_sig_value = None   # multi-signature actuellement affichee
         self.font_size = 10
         self.confirmed_value = None
         self.running = True
@@ -1414,6 +1462,7 @@ class App:
     def _show_placeholder(self):
         if not self.running:
             return
+        self._multi_sig_value = None
         try:
             self._loading_active = False
             self.val_label.config(text="—", fg=ACCENT,
@@ -1425,11 +1474,32 @@ class App:
         except Exception:
             pass
 
-    def _update_ui(self, value, matches):
+    def _show_multi_signature(self, value):
+        """Affiche une multi-signature : nombre confiant mais inconnu du CSV
+        (combinaison de plusieurs rochers). Evite de donner une fausse id."""
         if not self.running:
             return
         try:
-            self.val_label.config(text=value if value else "—",
+            self._loading_active = False
+            self.val_label.config(text=str(value), fg=GOLD,
+                                  font=("Courier", self.font_size + 10, "bold"))
+            for w in self.result_frame.winfo_children():
+                w.destroy()
+            tk.Label(self.result_frame, text=T("multi_sig"),
+                     bg=BG, fg=GOLD, font=("Courier", self.font_size, "bold"),
+                     anchor="w", justify="left", wraplength=480).pack(fill="x")
+            tk.Label(self.result_frame, text=T("multi_sig_hint"),
+                     bg=BG, fg=MUTED, font=("Courier", self.font_size - 1),
+                     anchor="w", justify="left", wraplength=480).pack(fill="x")
+        except Exception:
+            pass
+
+    def _update_ui(self, value, matches):
+        if not self.running:
+            return
+        self._multi_sig_value = None
+        try:
+            self.val_label.config(text=value if value else "—", fg=ACCENT,
                                   font=("Courier", self.font_size + 10, "bold"))
             for w in self.result_frame.winfo_children(): w.destroy()
         except Exception:
@@ -1530,16 +1600,22 @@ class App:
         # bloque (warmup EasyOCR), la subscription reste vivante.
         # Horodatage de la derniere fois ou la valeur confirmee a ete revue.
         last_confirmed_seen = time.monotonic()
+        last_multi_seen = time.monotonic()
         while self.running:
             try:
                 now = time.monotonic()
                 # Fork Launcher : capture + OCR chiffres delegues a Circus OCR.
-                raw = read_signature_via_circus_ocr(_ocr, self.lookup)
-                if DEBUG_OCR and raw:
-                    _debug_log(f"[RAW] {raw}")
+                # raw = valeur CSV (pilote le vote) ; raw_value = lecture brute
+                # plausible meme hors CSV (detection multi-signature).
+                raw, raw_value = read_signature_via_circus_ocr(_ocr, self.lookup)
+                if DEBUG_OCR and (raw or raw_value):
+                    _debug_log(f"[RAW] csv={raw} brut={raw_value}")
                 self.history.append(raw)
                 if len(self.history) > HISTORY_SIZE:
                     self.history.pop(0)
+                self.raw_history.append(raw_value)
+                if len(self.raw_history) > HISTORY_SIZE:
+                    self.raw_history.pop(0)
 
                 if raw is not None:
                     if self.confirmed_value is not None and not self._loading_active:
@@ -1563,8 +1639,34 @@ class App:
                     last_confirmed_seen = now
                     self.root.after(0, self._show_placeholder)
 
+                # Idem pour une multi-signature affichee : on la garde tant
+                # qu'on la revoit, on l'efface si le scan s'arrete.
+                if self._multi_sig_value is not None:
+                    if raw_value == self._multi_sig_value:
+                        last_multi_seen = now
+                    elif (now - last_multi_seen) > CLEAR_TIMEOUT_S:
+                        self.raw_history = []
+                        self.root.after(0, self._show_placeholder)
+
                 valid = [v for v in self.history if v is not None]
                 if len(valid) < VOTE_THRESHOLD:
+                    # Pas assez de votes CSV : peut-etre une MULTI-SIGNATURE.
+                    # Si une lecture brute confiante domine et n'est dans AUCUNE
+                    # signature connue (ni elle, ni ses variantes), c'est
+                    # vraisemblablement une combinaison de plusieurs rochers.
+                    # On l'affiche comme telle plutot que de forcer une fausse id.
+                    if self.confirmed_value is None and not self._loading_active:
+                        raw_valid = [v for v in self.raw_history if v is not None]
+                        if len(raw_valid) >= VOTE_THRESHOLD:
+                            from collections import Counter
+                            top, cnt = Counter(raw_valid).most_common(1)[0]
+                            if cnt >= VOTE_THRESHOLD and not _value_known(top, self.mapping, self.lookup):
+                                if self._multi_sig_value != top:
+                                    self._multi_sig_value = top
+                                    last_multi_seen = now
+                                    self.root.after(0, self._show_multi_signature, top)
+                                else:
+                                    last_multi_seen = now
                     time.sleep(INTERVAL)
                     continue
 
