@@ -1704,8 +1704,11 @@ class App:
                     has_match = bool(find_matches(int(v), self.mapping, self.lookup))
                     length_pref = len(v) if has_match else -len(v)
                     base_sig = min((e[0] for e in self.lookup.get(v, [])), default=999999)
-                    if all_csv:
-                        return (length_pref, -base_sig)
+                    # Le NOMBRE DE VOTES prime toujours : une lecture vue 50 fois
+                    # doit battre un raté transitoire vu 2 fois, meme si ce dernier
+                    # a une base plus basse. (Avant : all_csv ignorait le compte ->
+                    # 10000 battait 10800.) length/base ne servent que de
+                    # departage a votes egaux.
                     return (cnt, length_pref, -base_sig)
 
                 candidate = max(val_counts, key=_score)
@@ -1726,13 +1729,20 @@ class App:
                     if DEBUG_OCR:
                         _debug_log(f"[VARCHECK] confirmed={self.confirmed_value} candidate={candidate} in_variants={candidate in confirmed_variants}")
                     if candidate in confirmed_variants:
-                        if all_csv and candidate != self.confirmed_value:
+                        # Le candidat est une variante de la valeur confirmee.
+                        # On ne corrige QUE si cette variante est devenue
+                        # nettement plus frequente (vote majoritaire), pas parce
+                        # qu'elle a une base plus basse. Evite qu'un rate
+                        # transitoire (ex. 10000 vu 2 fois) remplace la vraie
+                        # valeur (10800 vue 50 fois).
+                        if candidate != self.confirmed_value:
                             candidate_votes = sum(g.get(candidate, 0) for g in groups.values())
-                            cur_base = min((e[0] for e in self.lookup.get(self.confirmed_value, [])), default=999999)
-                            new_base = min((e[0] for e in self.lookup.get(candidate, [])), default=999999)
-                            if new_base < cur_base and candidate_votes >= 2:
+                            confirmed_votes = sum(
+                                g.get(self.confirmed_value, 0) for g in groups.values()
+                            )
+                            if candidate_votes >= confirmed_votes + 3:
                                 if DEBUG_OCR:
-                                    _debug_log(f"[FIXUP] {self.confirmed_value} → {candidate} (base {cur_base} → {new_base})")
+                                    _debug_log(f"[FIXUP] {self.confirmed_value} → {candidate} (votes {confirmed_votes} → {candidate_votes})")
                                 self.confirmed_value = candidate
                                 self.root.after(0, self._update_ui, candidate,
                                                 find_matches(int(candidate), self.mapping, self.lookup))
