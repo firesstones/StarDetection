@@ -88,9 +88,37 @@ if getattr(_sys, "_MEIPASS", None):
 else:
     _BASE_DIR = Path(_os.path.dirname(_os.path.abspath(__file__)))
 
-CONFIG_FILE = _BASE_DIR / "config.json"
+# Fichiers UTILISATEUR (preferences, journaux de debogage).
+# - Windows : a cote de l'executable, comme depuis toujours (inchange).
+# - Linux : emplacements XDG du contrat Circus. Le launcher REMPLACE le dossier
+#   de l'outil a chaque mise a jour : y ecrire les preferences les effacerait.
+#     config : $XDG_CONFIG_HOME/Circus/star-detection/  (~/.config/...)
+#     etat   : $XDG_STATE_HOME/Circus/star-detection/   (~/.local/state/...)
+#   `liste.csv` reste a cote du script : c'est une donnee fournie, pas un
+#   reglage.
+def _xdg_tool_dir(env_name, *fallback):
+    base = _os.environ.get(env_name) or str(Path.home().joinpath(*fallback))
+    d = Path(base) / "Circus" / "star-detection"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+if _os.name == "nt":
+    _USER_CONFIG_DIR = _BASE_DIR
+    _USER_LOG_DIR = _BASE_DIR
+else:
+    _USER_CONFIG_DIR = _xdg_tool_dir("XDG_CONFIG_HOME", ".config")
+    _USER_LOG_DIR = _xdg_tool_dir("XDG_STATE_HOME", ".local", "state") / "logs"
+    try:
+        _USER_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+CONFIG_FILE = _USER_CONFIG_DIR / "config.json"
 CSV_FILE    = _BASE_DIR / "liste.csv"
-PREFS_FILE  = _BASE_DIR / "preferences.json"
+PREFS_FILE  = _USER_CONFIG_DIR / "preferences.json"
 
 # Fork Launcher : client du service partage Circus OCR. La capture + l'OCR
 # chiffres y sont delegues ; la zone radar est stockee dans regions.json.
@@ -361,7 +389,7 @@ def _debug_log(msg):
     line = f"[{ts}] {msg}"
     print(line)
     try:
-        log_file = _BASE_DIR / "debug.log"
+        log_file = _USER_LOG_DIR / "debug.log"
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
@@ -369,7 +397,7 @@ def _debug_log(msg):
 
 def _save_debug(img, label, ocr_result=None):
     """Sauvegarde une image de debug dans le dossier debug_ocr/."""
-    debug_dir = _BASE_DIR / "debug_ocr"
+    debug_dir = _USER_LOG_DIR / "debug_ocr"
     debug_dir.mkdir(exist_ok=True)
     import datetime
     ts = datetime.datetime.now().strftime("%H%M%S_%f")[:-3]
@@ -1215,11 +1243,11 @@ class Menu:
             self._btn_debug.config(text="DEBUG: ON", fg=ACCENT)
             try:
                 import datetime, shutil
-                debug_dir = _BASE_DIR / "debug_ocr"
+                debug_dir = _USER_LOG_DIR / "debug_ocr"
                 if debug_dir.exists():
                     shutil.rmtree(debug_dir)
                 debug_dir.mkdir(exist_ok=True)
-                log_file = _BASE_DIR / "debug.log"
+                log_file = _USER_LOG_DIR / "debug.log"
                 with open(log_file, "w", encoding="utf-8") as f:
                     f.write(f"=== DEBUG SESSION {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
             except Exception:

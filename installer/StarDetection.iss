@@ -1,7 +1,8 @@
 ; Installeur Star Detection (fork Circus Launcher).
 ; Bundle PyInstaller leger (sans Tesseract) qui delegue l'OCR a Circus OCR.
 #define AppName "Star Detection"
-#define AppVersion "0.3.1-launcher"
+#define AppVersion "0.3.1"
+#define AppBuild "1"
 #define AppPublisher "Circus / Kainan"
 #define AppExeName "StarDetection.exe"
 ; Dossier de sortie PyInstaller (onedir)
@@ -19,7 +20,7 @@ DefaultGroupName=Circus
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=..\dist-release
-OutputBaseFilename=StarDetection_Setup_v{#AppVersion}
+OutputBaseFilename=StarDetection_Setup_v{#AppVersion}-build{#AppBuild}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern

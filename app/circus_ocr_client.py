@@ -15,8 +15,9 @@ stockee au meme endroit cote Circus OCR. La correction OCR (matrice de
 confusion, vote, matching CSV minier) reste dans StarDetection.
 
 Decouverte du service : variable d'environnement `CIRCUS_OCR_URL`, sinon
-`http://127.0.0.1:8765` (defaut Circus OCR). Auto-demarrage via le script
-`start-circus-ocr.ps1` de l'installation Circus OCR si le service est arrete.
+`http://127.0.0.1:8765` (defaut Circus OCR). Auto-demarrage si le service est
+arrete : script `start-circus-ocr.ps1` sous Windows, binaire
+`bin/circus-ocr --background` sous Linux.
 """
 
 from __future__ import annotations
@@ -224,6 +225,13 @@ class CircusOcrClient:
         """Verifie /health, demarre Circus OCR si arrete, attend qu'il reponde."""
         if self.health():
             return True
+        # Linux : on lance le binaire `bin/circus-ocr --background` installe
+        # par Circus Launcher (meme mecanique que Circus Racing Linux). Le
+        # chemin PowerShell ci-dessous reste reserve a Windows.
+        if os.name != "nt":
+            if not self._start_linux_service():
+                return False
+            return self._wait_health(wait_s)
         script = self._find_start_script()
         if script is None:
             self._log("[Circus OCR] start-circus-ocr.ps1 introuvable")
@@ -247,7 +255,10 @@ class CircusOcrClient:
         except Exception as e:
             self._log(f"[Circus OCR] Demarrage impossible : {e}")
             return False
-        # Attente que /health reponde
+        return self._wait_health(wait_s)
+
+    def _wait_health(self, wait_s: float) -> bool:
+        """Attend que /health reponde apres une demande de demarrage."""
         deadline = time.monotonic() + wait_s
         while time.monotonic() < deadline:
             if self.health():
@@ -255,6 +266,85 @@ class CircusOcrClient:
             time.sleep(0.5)
         self._log("[Circus OCR] /health n'a pas repondu apres demarrage")
         return False
+
+    # ------------------------------------------------------------------
+    # Linux
+    # ------------------------------------------------------------------
+
+    def _start_linux_service(self) -> bool:
+        """Demarre Circus OCR sous Linux, detache de Star Detection.
+
+        Ordre de decouverte (identique a Circus Racing Linux) :
+          1. `CIRCUS_OCR_START_CMD` (commande complete, separateur '|'),
+             renseignee par le wrapper `bin/star-detection` ;
+          2. `bin/circus-ocr` dans `$XDG_DATA_HOME/CircusLauncher/tools/` ;
+          3. `circus-ocr` sur le PATH.
+        """
+        cmd_env = os.environ.get("CIRCUS_OCR_START_CMD", "").strip()
+        argv: list[str] = [t for t in cmd_env.split("|") if t] if cmd_env else []
+        if not argv:
+            exe = self._find_linux_start_exec()
+            if exe is not None:
+                argv = [str(exe), "--background"]
+        if not argv:
+            self._log("[Circus OCR] bin/circus-ocr introuvable : installez Circus OCR depuis Circus Launcher")
+            return False
+
+        log_handle = None
+        try:
+            log_path = self._linux_start_log_file()
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_handle = log_path.open("a", encoding="utf-8", errors="replace")
+            except Exception as e:  # noqa: BLE001
+                self._log(f"[Circus OCR] Log de demarrage indisponible ({log_path}) : {e}")
+            subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle if log_handle is not None else subprocess.DEVNULL,
+                stderr=subprocess.STDOUT if log_handle is not None else subprocess.DEVNULL,
+                # Nouvelle session : Circus OCR survit a la fermeture de Star
+                # Detection (il est partage avec les autres outils).
+                start_new_session=True,
+                close_fds=True,
+            )
+            self._log(f"[Circus OCR] Demarrage demande via {' '.join(argv)}")
+            return True
+        except Exception as e:  # noqa: BLE001
+            self._log(f"[Circus OCR] Demarrage Linux impossible : {e}")
+            return False
+        finally:
+            if log_handle is not None:
+                try:
+                    log_handle.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    @staticmethod
+    def _find_linux_start_exec() -> Optional[Path]:
+        """Cherche `bin/circus-ocr` aux emplacements canoniques Linux."""
+        candidates: list[Path] = []
+        env = os.environ.get("CIRCUS_OCR_EXEC")
+        if env:
+            candidates.append(Path(env))
+        xdg_data = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+        candidates.append(Path(xdg_data) / "CircusLauncher" / "tools" / "circus-ocr" / "bin" / "circus-ocr")
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if entry:
+                candidates.append(Path(entry) / "circus-ocr")
+        for c in candidates:
+            try:
+                if c.exists():
+                    return c
+            except OSError:
+                continue
+        return None
+
+    @staticmethod
+    def _linux_start_log_file() -> Path:
+        """Journal du demarrage de Circus OCR (XDG state de Star Detection)."""
+        xdg_state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+        return Path(xdg_state) / "Circus" / "star-detection" / "logs" / "start-circus-ocr.log"
 
     def _find_start_script(self) -> Optional[Path]:
         candidates: list[Path] = []

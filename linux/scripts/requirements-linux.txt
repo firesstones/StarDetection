@@ -1,0 +1,13 @@
+# Dependances de Star Detection sous Linux.
+#
+# Volontairement minimal : l'OCR est delegue au service Circus OCR (HTTP
+# local), donc ni EasyOCR, ni torch, ni Tesseract, ni OpenCV.
+#
+# tkinter n'est PAS installable par pip : il vient du paquet systeme
+#   Ubuntu/Debian : sudo apt install python3-tk
+#   Fedora        : sudo dnf install python3-tkinter
+#   Arch          : sudo pacman -S tk
+numpy>=1.24
+# mss < 10 : la 10.x change de backend Linux (xcb, libxcb-render requise) et
+# declare obsolete `mss.mss()`, l'API qu'utilise Star Detection.
+mss>=9.0,<10

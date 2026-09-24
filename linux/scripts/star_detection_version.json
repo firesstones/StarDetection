@@ -1,0 +1,7 @@
+{
+  "toolId": "star-detection",
+  "version": "0.3.1",
+  "channel": "beta",
+  "build": 1,
+  "platform": "linux-x64"
+}

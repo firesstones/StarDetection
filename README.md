@@ -39,6 +39,19 @@ app/
   liste.csv              <- base signatures radar -> minerais
 ```
 
+## Linux
+
+Le même code (`app/`) tourne sous Windows et Linux : les branches Linux y sont
+inertes sous Windows. `linux/scripts/` contient le lanceur `bin/star-detection`
+(Python 3.10+, venv dans `~/.cache/Circus/star-detection/venv`, numpy + mss),
+le contrat `--launcher-json` et `package_linux.py`, qui produit l'archive
+`star-detection-v<version>-linux-x64.tar.gz` + `linux-manifest.json` après avoir
+vérifié que la version correspond à l'installeur Windows.
+
+Chemins Linux : préférences `~/.config/Circus/star-detection/`, journaux
+`~/.local/state/Circus/star-detection/logs/`, zone radar partagée avec Circus OCR
+(`~/.config/Circus/circus-ocr/regions.json`).
+
 ## Crédits
 
 - Outil original : **Kainan & Claude AI** — https://github.com/kainann/StarDetection

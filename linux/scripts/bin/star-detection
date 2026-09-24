@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# star-detection - lanceur Linux de Star Detection (fork Circus Launcher).
+#
+# Roles :
+#   1. `--launcher-json ...` : repond au contrat launcher avec le Python du
+#      systeme, sans venv ni installation (rapide, sans ecran) ;
+#   2. sinon : trouver un Python >= 3.10 qui a tkinter, maintenir un venv
+#      local (numpy + mss), trouver Circus OCR, puis lancer l'application.
+#
+# La lecture de la signature radar est deleguee au service Circus OCR (HTTP
+# local) : aucun OCR lourd ici.
+#
+# Le venv vit dans le CACHE ($XDG_CACHE_HOME/Circus/star-detection/venv) et non
+# dans le dossier de l'outil : Circus Launcher remplace ce dossier a chaque mise
+# a jour, un venv place dedans serait retelecharge a chaque fois.
+#
+# Variables d'environnement reconnues :
+#   STAR_DETECTION_PYTHON          binaire python force
+#   STAR_DETECTION_VENV            chemin de venv force
+#   STAR_DETECTION_NO_INSTALL=1    desactive pip (dev / CI)
+#   STAR_DETECTION_FORCE_REINSTALL=1  force la reinstallation des dependances
+#   CIRCUS_OCR_URL                 service Circus OCR (defaut http://127.0.0.1:8765)
+#   CIRCUS_OCR_EXEC                chemin de `bin/circus-ocr`
+#   CIRCUS_OCR_START_CMD           commande complete (separateur '|')
+#
+# Journal du lanceur :
+#   $XDG_STATE_HOME/Circus/star-detection/logs/star-detection-wrapper.log
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+LIB_DIR="${INSTALL_ROOT}/lib"
+REQUIREMENTS_FILE="${INSTALL_ROOT}/requirements-linux.txt"
+
+XDG_STATE_HOME_VAL="${XDG_STATE_HOME:-${HOME}/.local/state}"
+XDG_DATA_HOME_VAL="${XDG_DATA_HOME:-${HOME}/.local/share}"
+XDG_CACHE_HOME_VAL="${XDG_CACHE_HOME:-${HOME}/.cache}"
+LOG_DIR="${XDG_STATE_HOME_VAL}/Circus/star-detection/logs"
+WRAPPER_LOG="${LOG_DIR}/star-detection-wrapper.log"
+
+REQUIRED_MODULES=(numpy mss)
+
+# --- Mode contrat launcher : JSON uniquement, jamais d'installation ---------
+for arg in "$@"; do
+  if [[ "${arg}" == "--launcher-json" ]]; then
+    for candidate in python3 python3.12 python3.11 python3.10; do
+      if command -v "${candidate}" >/dev/null 2>&1; then
+        exec "${candidate}" "${LIB_DIR}/stardetection_launcher_cli.py" "$@"
+      fi
+    done
+    printf '{"ok":false,"error":"Python 3 introuvable sur le systeme."}\n'
+    exit 1
+  fi
+done
+
+mkdir -p "${LOG_DIR}" 2>/dev/null || true
+
+log_line() {
+  local ts
+  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
+  printf '[%s] %s\n' "${ts}" "$*" >&2
+  printf '[%s] %s\n' "${ts}" "$*" >>"${WRAPPER_LOG}" 2>/dev/null || true
+}
+
+# Message a l'utilisateur : le lanceur est souvent demarre sans terminal
+# (depuis Circus Launcher), on tente donc aussi une notification bureau.
+fatal() {
+  log_line "FATAL: $*"
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send "Star Detection" "$*" 2>/dev/null || true
+  fi
+  exit 1
+}
+
+log_line "=== star-detection start (args: $*) ==="
+log_line "install_root=${INSTALL_ROOT}"
+
+# --- Python >= 3.10 AVEC tkinter ---------------------------------------------
+# tkinter vient du paquet systeme (pas de pip) : un Python sans lui ne peut pas
+# afficher l'interface, autant le dire clairement tout de suite.
+pick_python() {
+  if [[ -n "${STAR_DETECTION_PYTHON:-}" ]]; then
+    echo "${STAR_DETECTION_PYTHON}"
+    return 0
+  fi
+  local candidate
+  for candidate in python3.12 python3.11 python3.10 python3; do
+    if command -v "${candidate}" >/dev/null 2>&1 \
+       && "${candidate}" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+      echo "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+PYTHON="$(pick_python || true)"
+if [[ -z "${PYTHON}" ]]; then
+  log_line "Ubuntu/Debian : sudo apt install python3 python3-venv python3-tk"
+  log_line "Fedora        : sudo dnf install python3 python3-tkinter"
+  fatal "Python 3.10 ou plus recent est necessaire."
+fi
+log_line "python=${PYTHON}"
+
+if ! "${PYTHON}" -c 'import tkinter' 2>/dev/null; then
+  log_line "Ubuntu/Debian : sudo apt install python3-tk"
+  log_line "Fedora        : sudo dnf install python3-tkinter"
+  log_line "Arch          : sudo pacman -S tk"
+  fatal "tkinter est absent : installez le paquet python3-tk de votre distribution."
+fi
+
+# --- venv (dans le cache, survit aux mises a jour de l'outil) ---------------
+VENV_DIR="${STAR_DETECTION_VENV:-${XDG_CACHE_HOME_VAL}/Circus/star-detection/venv}"
+VENV_PY="${VENV_DIR}/bin/python"
+log_line "venv=${VENV_DIR}"
+
+# --system-site-packages : le venv herite de tkinter (paquet systeme), qu'un
+# venv isole ne verrait pas.
+create_venv() {
+  log_line "creation du venv ..."
+  rm -rf "${VENV_DIR}"
+  mkdir -p "$(dirname "${VENV_DIR}")"
+  if ! "${PYTHON}" -m venv --system-site-packages "${VENV_DIR}" >>"${WRAPPER_LOG}" 2>&1; then
+    fatal "Creation de l'environnement Python impossible. Installez python3-venv."
+  fi
+  "${VENV_PY}" -m pip install --upgrade pip >>"${WRAPPER_LOG}" 2>&1 \
+    || log_line "WARN: mise a jour de pip impossible, on continue"
+}
+
+# Un venv dont le Python ne demarre plus (Python du systeme mis a jour ou
+# supprime) est recree au lieu de faire echouer le lancement.
+if [[ ! -x "${VENV_PY}" ]] || ! "${VENV_PY}" -c 'import tkinter' 2>/dev/null; then
+  create_venv
+fi
+
+# --- Dependances -------------------------------------------------------------
+list_missing() {
+  "${VENV_PY}" - "$@" <<'PY' 2>/dev/null
+import importlib.util as u, sys
+for mod in sys.argv[1:]:
+    if u.find_spec(mod) is None:
+        print(mod)
+PY
+}
+
+# Empreinte de requirements-linux.txt : le venv survit aux mises a jour de
+# l'outil, donc une MAJ qui change une version de dependance doit relancer pip
+# meme si les modules sont deja importables.
+REQ_STAMP="${VENV_DIR}/.circus-requirements.sha256"
+REQ_HASH="$(sha256sum "${REQUIREMENTS_FILE}" 2>/dev/null | cut -d' ' -f1)"
+REQ_CHANGED=0
+if [[ -n "${REQ_HASH}" ]] && [[ "$(cat "${REQ_STAMP}" 2>/dev/null)" != "${REQ_HASH}" ]]; then
+  REQ_CHANGED=1
+fi
+
+MISSING="$(list_missing "${REQUIRED_MODULES[@]}")"
+if [[ -n "${MISSING}" ]] || [[ "${REQ_CHANGED}" == "1" ]] \
+   || [[ "${STAR_DETECTION_FORCE_REINSTALL:-0}" == "1" ]]; then
+  if [[ "${STAR_DETECTION_NO_INSTALL:-0}" == "1" ]]; then
+    log_line "pip desactive (STAR_DETECTION_NO_INSTALL=1)"
+  else
+    log_line "installation des dependances (manquants : $(echo ${MISSING:-aucun} | tr '\n' ' '), liste modifiee : ${REQ_CHANGED})"
+    if "${VENV_PY}" -m pip install --disable-pip-version-check -r "${REQUIREMENTS_FILE}" \
+         >>"${WRAPPER_LOG}" 2>&1; then
+      [[ -n "${REQ_HASH}" ]] && printf '%s\n' "${REQ_HASH}" >"${REQ_STAMP}"
+    else
+      log_line "ERROR: pip install a echoue (voir ce journal)"
+    fi
+  fi
+  MISSING="$(list_missing "${REQUIRED_MODULES[@]}")"
+fi
+if [[ -n "${MISSING}" ]]; then
+  fatal "Dependances manquantes ($(echo ${MISSING} | tr '\n' ' ')). Detail : ${WRAPPER_LOG}"
+fi
+log_line "dependances OK"
+
+# --- Circus OCR (auto-demarrage par l'application) ---------------------------
+if [[ -z "${CIRCUS_OCR_EXEC:-}" ]]; then
+  CANDIDATE="${XDG_DATA_HOME_VAL}/CircusLauncher/tools/circus-ocr/bin/circus-ocr"
+  if [[ -x "${CANDIDATE}" ]]; then
+    export CIRCUS_OCR_EXEC="${CANDIDATE}"
+  elif command -v circus-ocr >/dev/null 2>&1; then
+    export CIRCUS_OCR_EXEC="$(command -v circus-ocr)"
+  fi
+fi
+if [[ -n "${CIRCUS_OCR_EXEC:-}" ]] && [[ -z "${CIRCUS_OCR_START_CMD:-}" ]]; then
+  export CIRCUS_OCR_START_CMD="${CIRCUS_OCR_EXEC}|--background"
+fi
+log_line "CIRCUS_OCR_EXEC=${CIRCUS_OCR_EXEC:-<absent : Circus OCR non installe ?>}"
+
+# --- Lancement -----------------------------------------------------------------
+export PYTHONPATH="${LIB_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONUNBUFFERED=1
+log_line "exec ${VENV_PY} ${LIB_DIR}/screen_monitor.py $*"
+cd "${LIB_DIR}" || fatal "Dossier ${LIB_DIR} introuvable."
+exec "${VENV_PY}" "${LIB_DIR}/screen_monitor.py" "$@"
